@@ -86,17 +86,20 @@ WHERE
 	// get scanner ids
 	scannerIDs := make([]int64, len(scnrs))
 	for i, scnr := range scnrs {
-
+		ctx, done := context.WithTimeout(ctx, time.Second)
 		start := time.Now()
 		err := s.pool.QueryRow(ctx, selectScanner, scnr.Name(), scnr.Version(), scnr.Kind()).
 			Scan(&scannerIDs[i])
+		done()
 		if err != nil {
-			return nil, fmt.Errorf("store:packageByLayer failed to retrieve scanner ids for scnr %v: %v", scnr, err)
+			return nil, fmt.Errorf("failed to retrieve scanner ids: %w", err)
 		}
 		packagesByLayerCounter.WithLabelValues("selectScanner").Add(1)
 		packagesByLayerDuration.WithLabelValues("selectScanner").Observe(time.Since(start).Seconds())
 	}
 
+	ctx, done := context.WithTimeout(ctx, 15*time.Second)
+	defer done()
 	start := time.Now()
 	rows, err := s.pool.Query(ctx, query, hash, scannerIDs)
 	switch {
@@ -104,7 +107,7 @@ WHERE
 	case errors.Is(err, pgx.ErrNoRows):
 		return nil, fmt.Errorf("store:packagesByLayer no packages found for hash %v and scanners %v", hash, scnrs)
 	default:
-		return nil, fmt.Errorf("store:packagesByLayer failed to retrieve package rows for hash %v and scanners %v: %v", hash, scnrs, err)
+		return nil, fmt.Errorf("store:packagesByLayer failed to retrieve package rows for hash %v and scanners %v: %w", hash, scnrs, err)
 	}
 	packagesByLayerCounter.WithLabelValues("query").Add(1)
 	packagesByLayerDuration.WithLabelValues("query").Observe(time.Since(start).Seconds())
@@ -141,7 +144,7 @@ WHERE
 		pkg.ID = strconv.FormatInt(id, 10)
 		spkg.ID = strconv.FormatInt(srcID, 10)
 		if err != nil {
-			return nil, fmt.Errorf("store:packagesByLayer failed to scan packages: %v", err)
+			return nil, fmt.Errorf("failed to scan packages: %w", err)
 		}
 		if nKind != nil {
 			pkg.NormalizedVersion.Kind = *nKind

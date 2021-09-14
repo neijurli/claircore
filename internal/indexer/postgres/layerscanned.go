@@ -64,6 +64,8 @@ SELECT
 `
 	)
 
+	ctx, done := context.WithTimeout(ctx, 10*time.Second)
+	defer done()
 	start := time.Now()
 	var scannerID int64
 	err := s.pool.QueryRow(ctx, selectScanner, scnr.Name(), scnr.Version(), scnr.Kind()).
@@ -90,5 +92,4 @@ SELECT
 	layerScannedDuration.WithLabelValues("selectScanned").Observe(time.Since(start).Seconds())
 
 	return ok, nil
-
 }

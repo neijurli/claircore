@@ -10,12 +10,12 @@ import (
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/quay/zlog"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/label"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/quay/claircore"
 	"github.com/quay/claircore/pkg/omnimatcher"
 )
@@ -131,19 +131,20 @@ WHERE
 	// by the vulnerability in question.
 	pkgsToFilter := []claircore.Package{}
 
+	tctx, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
 	start := time.Now()
-	rows, err := s.pool.Query(ctx, selectPackages, v.Package.Name)
+	rows, err := s.pool.Query(tctx, selectPackages, v.Package.Name)
 	switch {
 	case errors.Is(err, nil):
 	case errors.Is(err, pgx.ErrNoRows):
 		return []claircore.Digest{}, nil
 	default:
-		return nil, fmt.Errorf("failed to query packages associated with vulnerability %+v: %v", v, err)
+		return nil, fmt.Errorf("failed to query packages associated with vulnerability %q: %w", v.ID, err)
 	}
-	affectedManifestsCounter.WithLabelValues("selectPackages").Add(1)
-	affectedManifestsDuration.WithLabelValues(("selectPackages")).Observe(time.Since(start).Seconds())
-
 	defer rows.Close()
+	affectedManifestsCounter.WithLabelValues("selectPackages").Add(1)
+	affectedManifestsDuration.WithLabelValues("selectPackages").Observe(time.Since(start).Seconds())
 
 	for rows.Next() {
 		var pkg claircore.Package
@@ -161,7 +162,7 @@ WHERE
 			&pkg.Arch,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan package: %v", err)
+			return nil, fmt.Errorf("failed to scan package: %w", err)
 		}
 		idStr := strconv.FormatInt(id, 10)
 		pkg.ID = idStr
@@ -175,7 +176,7 @@ WHERE
 	}
 	zlog.Debug(ctx).Int("count", len(pkgsToFilter)).Msg("packages to filter")
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning packages: %v", err)
+		return nil, fmt.Errorf("error scanning packages: %w", err)
 	}
 
 	// for each package discovered create an index record
@@ -197,56 +198,53 @@ WHERE
 			})
 		}
 	}
-	zlog.Debug(ctx).Int("count", len(filteredRecords)).Msg("vulnerable indexrecords")
+	zlog.Debug(ctx).Int("count", len(filteredRecords)).Msg("vulnerable index records")
 
-	// Query the manifest index for manifests containing
-	// the vulnerable indexrecords and create a set
-	// containing each unique manifest.
-	//
-	// Since this loop opens a db conn each iteration the returned rows
-	// handle must be closed manually and not deferred else a buildup of db conns
-	// may occur until the method exits.
+	// Query the manifest index for manifests containing the vulnerable
+	// IndexRecords and create a set containing each unique manifest.
 	set := map[string]struct{}{}
 	out := []claircore.Digest{}
 	for _, record := range filteredRecords {
 		v, err := toValues(record)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve record %+v to sql values for query: %v", record, err)
+			return nil, fmt.Errorf("failed to resolve record %+v to sql values for query: %w", record, err)
 		}
 
-		start := time.Now()
-		rows, err := s.pool.Query(ctx,
-			selectAffected,
-			record.Package.ID,
-			v[2],
-			v[3],
-		)
-		switch {
-		case errors.Is(err, nil):
-		case errors.Is(err, pgx.ErrNoRows):
-			err = fmt.Errorf("failed to query the manifest index: %v", err)
-			fallthrough
-		default:
-			rows.Close()
-			return nil, err
-		}
-		affectedManifestsCounter.WithLabelValues("selectAffected").Add(1)
-		affectedManifestsDuration.WithLabelValues(("selectAffected")).Observe(time.Since(start).Seconds())
+		err = func() error {
+			tctx, done := context.WithTimeout(ctx, 30*time.Second)
+			defer done()
+			start := time.Now()
+			rows, err := s.pool.Query(tctx,
+				selectAffected,
+				record.Package.ID,
+				v[2],
+				v[3],
+			)
+			switch {
+			case errors.Is(err, nil):
+			case errors.Is(err, pgx.ErrNoRows):
+				err = fmt.Errorf("failed to query the manifest index: %w", err)
+				fallthrough
+			default:
+				return err
+			}
+			defer rows.Close()
+			affectedManifestsCounter.WithLabelValues("selectAffected").Add(1)
+			affectedManifestsDuration.WithLabelValues("selectAffected").Observe(time.Since(start).Seconds())
 
-		for rows.Next() {
-			var hash claircore.Digest
-			err := rows.Scan(&hash)
-			if err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("failed scanning manifest hash into digest: %v", err)
+			for rows.Next() {
+				var hash claircore.Digest
+				err := rows.Scan(&hash)
+				if err != nil {
+					return fmt.Errorf("failed scanning manifest hash into digest: %w", err)
+				}
+				if _, ok := set[hash.String()]; !ok {
+					set[hash.String()] = struct{}{}
+					out = append(out, hash)
+				}
 			}
-			if _, ok := set[hash.String()]; !ok {
-				set[hash.String()] = struct{}{}
-				out = append(out, hash)
-			}
-		}
-		err = rows.Err()
-		rows.Close()
+			return rows.Err()
+		}()
 		if err != nil {
 			return nil, err
 		}
@@ -279,6 +277,7 @@ func protoRecord(ctx context.Context, pool *pgxpool.Pool, v claircore.Vulnerabil
 			AND key = $2
 			AND uri = $3;
 		`
+		timeout = 5 * time.Second
 	)
 	ctx = baggage.ContextWithValues(ctx,
 		label.String("component", "internal/indexer/postgres/protoRecord"))
@@ -287,6 +286,7 @@ func protoRecord(ctx context.Context, pool *pgxpool.Pool, v claircore.Vulnerabil
 	// fill dist into prototype index record if exists
 	if (v.Dist != nil) && (v.Dist.Name != "") {
 		start := time.Now()
+		ctx, done := context.WithTimeout(ctx, timeout)
 		row := pool.QueryRow(ctx,
 			selectDist,
 			v.Dist.Arch,
@@ -300,9 +300,10 @@ func protoRecord(ctx context.Context, pool *pgxpool.Pool, v claircore.Vulnerabil
 		)
 		var id pgtype.Int8
 		err := row.Scan(&id)
+		done()
 		if err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
-				return protoRecord, fmt.Errorf("failed to scan dist: %v", err)
+				return protoRecord, fmt.Errorf("failed to scan dist: %w", err)
 			}
 		}
 		protoRecordCounter.WithLabelValues("selectDist").Add(1)
@@ -328,6 +329,7 @@ func protoRecord(ctx context.Context, pool *pgxpool.Pool, v claircore.Vulnerabil
 	// fill repo into prototype index record if exists
 	if (v.Repo != nil) && (v.Repo.Name != "") {
 		start := time.Now()
+		ctx, done := context.WithTimeout(ctx, timeout)
 		row := pool.QueryRow(ctx, selectRepo,
 			v.Repo.Name,
 			v.Repo.Key,
@@ -335,9 +337,10 @@ func protoRecord(ctx context.Context, pool *pgxpool.Pool, v claircore.Vulnerabil
 		)
 		var id pgtype.Int8
 		err := row.Scan(&id)
+		done()
 		if err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
-				return protoRecord, fmt.Errorf("failed to scan repo: %v", err)
+				return protoRecord, fmt.Errorf("failed to scan repo: %w", err)
 			}
 		}
 		protoRecordCounter.WithLabelValues("selectDist").Add(1)

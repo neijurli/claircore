@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/quay/claircore"
 )
 
@@ -57,10 +58,12 @@ DO
 	// we cast scanner.IndexReport to jsonbIndexReport in order to obtain the value/scan
 	// implementations
 
+	ctx, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
 	start := time.Now()
 	_, err := s.pool.Exec(ctx, query, ir.Hash, jsonbIndexReport(*ir))
 	if err != nil {
-		return fmt.Errorf("failed to upsert index report: %v", err)
+		return fmt.Errorf("failed to upsert index report: %w", err)
 	}
 	setIndexReportCounter.WithLabelValues("query").Add(1)
 	setIndexReportDuration.WithLabelValues("query").Observe(time.Since(start).Seconds())

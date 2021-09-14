@@ -8,28 +8,21 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/quay/zlog"
-	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/label"
 
 	"github.com/quay/claircore/internal/indexer"
 )
 
-var (
-	scannedManifestCounter = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "claircore",
-			Subsystem: "indexer",
-			Name:      "scanned_manifests",
-			Help:      "Total number of scanned manifests.",
-		},
-		[]string{"scanned_before"},
-	)
+var scannedManifestCounter = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "claircore",
+		Subsystem: "indexer",
+		Name:      "scanned_manifests",
+		Help:      "Total number of scanned manifests.",
+	},
+	[]string{"scanned_before"},
 )
 
 func checkManifest(ctx context.Context, s *Controller) (State, error) {
-	ctx = baggage.ContextWithValues(ctx,
-		label.String("state", s.getState().String()))
-
 	// determine if we've seen this manifest and if we've
 	// scanned it with the desired scanners
 	ok, err := s.Store.ManifestScanned(ctx, s.manifest.Hash, s.Vscnrs)
@@ -61,7 +54,7 @@ func checkManifest(ctx context.Context, s *Controller) (State, error) {
 
 		err := s.Store.PersistManifest(ctx, *s.manifest)
 		if err != nil {
-			return Terminal, fmt.Errorf("failed to persist manifest: %v", err)
+			return Terminal, fmt.Errorf("failed to persist manifest: %w", err)
 		}
 		return FetchLayers, nil
 	}
@@ -71,10 +64,10 @@ func checkManifest(ctx context.Context, s *Controller) (State, error) {
 	zlog.Info(ctx).Msg("manifest already scanned")
 	sr, ok, err := s.Store.IndexReport(ctx, s.manifest.Hash)
 	if err != nil {
-		return Terminal, fmt.Errorf("failed to retrieve manifest: %v", err)
+		return Terminal, fmt.Errorf("failed to retrieve manifest: %w", err)
 	}
 	if !ok {
-		return Terminal, fmt.Errorf("failed to retrieve manifest: %v", err)
+		return Terminal, fmt.Errorf("failed to retrieve manifest: %w", err)
 	}
 	s.report = sr
 

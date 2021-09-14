@@ -5,13 +5,9 @@ import (
 	"fmt"
 
 	"github.com/quay/zlog"
-	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/label"
 )
 
 func indexManifest(ctx context.Context, c *Controller) (State, error) {
-	ctx = baggage.ContextWithValues(ctx,
-		label.String("state", c.getState().String()))
 	zlog.Info(ctx).Msg("starting index manifest")
 
 	if c.report == nil {
@@ -20,7 +16,7 @@ func indexManifest(ctx context.Context, c *Controller) (State, error) {
 
 	err := c.Store.IndexManifest(ctx, c.report)
 	if err != nil {
-		return Terminal, fmt.Errorf("indexing manifest contents failed: %v", err)
+		return Terminal, fmt.Errorf("indexing manifest contents failed: %w", err)
 	}
 	return IndexFinished, nil
 }

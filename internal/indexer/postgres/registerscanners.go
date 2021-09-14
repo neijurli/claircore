@@ -60,13 +60,16 @@ SELECT
 
 	var ok bool
 	var err error
+	var tctx context.Context
+	var done context.CancelFunc
 	for _, v := range vs {
-
+		tctx, done = context.WithTimeout(ctx, time.Second)
 		start := time.Now()
-		err = s.pool.QueryRow(ctx, exists, v.Name(), v.Version(), v.Kind()).
+		err = s.pool.QueryRow(tctx, exists, v.Name(), v.Version(), v.Kind()).
 			Scan(&ok)
+		done()
 		if err != nil {
-			return fmt.Errorf("failed getting id for scanner %q: %v", v.Name(), err)
+			return fmt.Errorf("failed getting id for scanner %q: %w", v.Name(), err)
 		}
 		registerScannerCounter.WithLabelValues("exists").Add(1)
 		registerScannerDuration.WithLabelValues("exists").Observe(time.Since(start).Seconds())
@@ -74,10 +77,12 @@ SELECT
 			continue
 		}
 
+		tctx, done = context.WithTimeout(ctx, time.Second)
 		start = time.Now()
-		_, err = s.pool.Exec(ctx, insert, v.Name(), v.Version(), v.Kind())
+		_, err = s.pool.Exec(tctx, insert, v.Name(), v.Version(), v.Kind())
+		done()
 		if err != nil {
-			return fmt.Errorf("failed to insert scanner %v: %v", v.Name(), err)
+			return fmt.Errorf("failed to insert scanner %q: %w", v.Name(), err)
 		}
 		registerScannerCounter.WithLabelValues("insert").Add(1)
 		registerScannerDuration.WithLabelValues("insert").Observe(time.Since(start).Seconds())
